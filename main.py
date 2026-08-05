@@ -333,8 +333,8 @@ def cache_pct(d: dict) -> float:
 
 def fmt_cost(v: float | None) -> str:
     if v is None: return "n/a"
-    if v < 0.005: return "<1c"
-    if v < 1:     return f"{v * 100:.0f}c"
+    if v < 0.005: return "<$0.01"
+    if v < 1:     return f"${v:.2f}"
     return f"${v:.1f}"
 
 
@@ -904,6 +904,18 @@ def _new_model_bucket():
     return {**_empty_bucket(), "speeds": defaultdict(int), "efforts": defaultdict(int)}
 
 
+def _accumulate(bucket: dict, usage: dict, speed: str = "", effort: str = ""):
+    bucket["calls"] += 1
+    bucket["input"] += usage.get("input_tokens", 0)
+    bucket["output"] += usage.get("output_tokens", 0)
+    bucket["cache_read"] += usage.get("cache_read_input_tokens", 0)
+    bucket["cache_write"] += usage.get("cache_creation_input_tokens", 0)
+    if speed:
+        bucket["speeds"][speed] += 1
+    if effort:
+        bucket["efforts"][effort] += 1
+
+
 def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
     """Returns (by_model, by_agent, last_by_model, last_agents).
 
@@ -924,6 +936,8 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
         subagent_files = list(subagents_dir.rglob("agent-*.jsonl"))
 
     latest_prompt_id = None
+    _SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
+    system_pids: set[str] = set()
 
     # ── main session file ──
     try:
@@ -939,12 +953,16 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
             except (json.JSONDecodeError, ValueError):
                 continue
             pid = obj.get("promptId")
-            if pid and pid != latest_prompt_id:
+            if pid and pid != latest_prompt_id and pid not in system_pids:
                 msg_content = (obj.get("message") or {}).get("content", "")
                 if isinstance(msg_content, list):
                     msg_content = (msg_content[0].get("text", "")
                                    if msg_content and isinstance(msg_content[0], dict) else "")
-                if not (isinstance(msg_content, str) and msg_content.lstrip().startswith("<")):
+                if isinstance(msg_content, str) and any(
+                    msg_content.lstrip().startswith(p) for p in _SYSTEM_PREFIXES
+                ):
+                    system_pids.add(pid)
+                else:
                     latest_prompt_id = pid
                     last_by_model = defaultdict(_new_model_bucket)
             req_id = obj.get("requestId")
@@ -959,15 +977,7 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
             speed = usage.get("speed", "")
             effort = obj.get("effort", "")
             for bucket in (by_model[model], last_by_model[model]):
-                bucket["calls"] += 1
-                bucket["input"] += usage.get("input_tokens", 0)
-                bucket["output"] += usage.get("output_tokens", 0)
-                bucket["cache_read"] += usage.get("cache_read_input_tokens", 0)
-                bucket["cache_write"] += usage.get("cache_creation_input_tokens", 0)
-                if speed:
-                    bucket["speeds"][speed] += 1
-                if effort:
-                    bucket["efforts"][effort] += 1
+                _accumulate(bucket, usage, speed, effort)
 
     # ── subagent files ──
     for sf in subagent_files:
@@ -1004,15 +1014,7 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
                 for bucket in (by_model[model], file_usage[model]):
-                    bucket["calls"] += 1
-                    bucket["input"] += usage.get("input_tokens", 0)
-                    bucket["output"] += usage.get("output_tokens", 0)
-                    bucket["cache_read"] += usage.get("cache_read_input_tokens", 0)
-                    bucket["cache_write"] += usage.get("cache_creation_input_tokens", 0)
-                    if speed:
-                        bucket["speeds"][speed] += 1
-                    if effort:
-                        bucket["efforts"][effort] += 1
+                    _accumulate(bucket, usage, speed, effort)
 
         is_current = (not latest_prompt_id) or (latest_prompt_id in file_prompt_ids)
         if agent_type:
@@ -1022,15 +1024,11 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
         if is_current:
             for model, fu in file_usage.items():
                 lm = last_by_model[model]
-                lm["calls"] += fu["calls"]
-                lm["input"] += fu["input"]
-                lm["output"] += fu["output"]
-                lm["cache_read"] += fu["cache_read"]
-                lm["cache_write"] += fu["cache_write"]
-                for s, c in fu["speeds"].items():
-                    lm["speeds"][s] += c
-                for e, c in fu["efforts"].items():
-                    lm["efforts"][e] += c
+                merge_buckets(lm, fu)
+                for s, cnt in fu["speeds"].items():
+                    lm["speeds"][s] += cnt
+                for e, cnt in fu["efforts"].items():
+                    lm["efforts"][e] += cnt
 
     return dict(by_model), dict(by_agent), dict(last_by_model), dict(last_agents)
 
@@ -1144,9 +1142,8 @@ def run_status_line():
             parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])}){tag_str}")
         if agents:
             agent_parts = []
-            for atype in sorted(agents, key=lambda a: agents[a] if isinstance(agents[a], int) else agents[a].get("calls", 0), reverse=True):
-                v = agents[atype]
-                count = v if isinstance(v, int) else v.get("calls", 0)
+            for atype in sorted(agents, key=lambda a: agents[a], reverse=True):
+                count = agents[atype]
                 agent_parts.append(f"{atype}×{count}")
             if agent_parts:
                 parts.append(f"agents: {', '.join(agent_parts)}")
