@@ -12,8 +12,10 @@ A CLI tool that scans local Claude Code JSONL session files and reports token us
 - **Per-session drill-down** for any given date, with per-model sub-rows for multi-model sessions
 - **Project-level aggregation** across all sessions
 - **Top projects per day** view
-- **Subagent tracking** — picks up Haiku/Sonnet subagent calls from the `subagents/` directory
-- **Claude Code status line** showing per-model prompt and session costs with speed and effort level
+- **Volume discount** — applies a configurable volume discount (default 13%) to all cost calculations
+- **Per-prompt cost tracking** — status line shows cost for the current prompt (not just the last API call increment), using `promptId` boundaries from the JSONL
+- **Subagent tracking** — discovers subagent JSONL files (including nested `workflows/wf_*/` directories) and displays per-type invocation counts (e.g. `agents: Explore×3, general-purpose×2`)
+- **Claude Code status line** showing per-model prompt and session costs with speed, effort level, and subagent counts
 - **Rates table** — view current pricing for all models with `--rates`
 - **Markdown export** with clipboard copy support (cross-platform: macOS, Linux, Windows)
 
@@ -99,12 +101,12 @@ Replace `/path/to/price-check` with the actual path where you saved the script.
 This gives you:
 
 - **SessionStart hook** — fetches latest model pricing from Anthropic when Claude Code starts
-- **Stop hook** — records per-model token usage after each turn
-- **Status line** — shows per-model cost breakdown:
+- **Stop hook** — records per-model token usage after each prompt
+- **Status line** — shows per-model cost breakdown with subagent counts:
 
   ```
-  Prompt: Opus 4.6: 15c (253.2K) [standard,high] | Haiku 4.5: 2c (80K) [standard]
-  Session: Opus 4.6: $4.8 (5.2M) [standard,high] | Haiku 4.5: 5c (300K) [standard]
+  Prompt: Opus 4.6: $0.15 (253.2K) [standard,high] | Haiku 4.5: $0.02 (80K) [standard] | agents: Explore×2
+  Session: Opus 4.6: $4.8 (5.2M) [standard,high] | Haiku 4.5: $0.05 (300K) [standard] | agents: Explore×5, general-purpose×3
   ```
 
 ## Usage
@@ -229,7 +231,7 @@ python3 main.py --rates
 ```
 
 ```
-  💲 Model Rates  ($/MTok, updated 2026-08-05)
+  💲 Model Rates  ($/MTok, 13% discount, updated 2026-08-05)
 
   ┌────────────────┬──────────┬──────────┬──────────┬──────────┐
   │ Model          │    Input │   Output │  CacheRd │  CacheWr │
@@ -265,6 +267,8 @@ python3 main.py --copy
 ## Pricing
 
 Rates are fetched automatically from [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) when Claude Code starts (via the `SessionStart` hook) and cached at `~/.claude/price-check-rates.json`. If the fetch fails (offline, etc.), cached data is used. If no pricing data exists at all, costs display as `n/a`.
+
+A 13% volume discount is applied to all cost calculations (configurable via the `_DISCOUNT` constant in `main.py`). The discount percentage is shown in the `--rates` output header.
 
 Force-refresh with `--update-pricing`. View current rates with `--rates`.
 
