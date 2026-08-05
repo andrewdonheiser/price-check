@@ -27,9 +27,6 @@ MAX_JSONL_SIZE = 100 * 1024 * 1024  # 100 MB
 PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 PRICING_FILE = Path.home() / ".claude" / "price-check-rates.json"
 
-CACHE_WRITE_MULT = 1.25
-CACHE_READ_MULT = 0.10
-
 
 def _fetch_pricing() -> dict:
     req = urllib.request.Request(PRICING_URL, headers={"User-Agent": "price-check/1.0"})
@@ -553,6 +550,7 @@ def print_sessions(session_data: dict[str, dict], date_str: str):
 
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_cost_val = 0.0
+    has_unknown_cost = False
 
     for sid, s in sorted_sessions:
         totals = _session_totals(s)
@@ -578,16 +576,17 @@ def print_sessions(session_data: dict[str, dict], date_str: str):
         if c_val is not None:
             total_cost_val += c_val
         else:
-            total_cost_val = None
+            has_unknown_cost = True
 
     grand_totals = _empty_bucket()
     for d in grand_by_model.values():
         merge_buckets(grand_totals, d)
     tok_total = total_tokens(grand_totals)
     ttc = tier_color(tok_total)
-    tc = cost_color(total_cost_val)
+    final_cost = None if has_unknown_cost else total_cost_val
+    tc = cost_color(final_cost)
     print(f"  {bar('├', '┼', '┤')}")
-    print(f"  {row(f'Total ({len(sorted_sessions)})', '', '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), fmt_tokens(tok_total), fmt_cost_col(total_cost_val), colors=[255, 0, 0, 72, 136, 209, ttc, tc], is_bold=True)}")
+    print(f"  {row(f'Total ({len(sorted_sessions)})', '', '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), fmt_tokens(tok_total), fmt_cost_col(final_cost), colors=[255, 0, 0, 72, 136, 209, ttc, tc], is_bold=True)}")
     print(f"  {bar('└', '┴', '┘')}")
 
     if len(grand_by_model) > 1:
@@ -691,6 +690,7 @@ def print_projects_summary(session_data: dict[str, dict], days: int):
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_sessions = 0
     total_cost_val = 0.0
+    has_unknown_cost = False
 
     for project, pd in sorted_projects:
         totals = _empty_bucket()
@@ -716,16 +716,17 @@ def print_projects_summary(session_data: dict[str, dict], days: int):
         if c_val is not None:
             total_cost_val += c_val
         else:
-            total_cost_val = None
+            has_unknown_cost = True
 
     grand_totals = _empty_bucket()
     for d in grand_by_model.values():
         merge_buckets(grand_totals, d)
     tok_total = total_tokens(grand_totals)
     ttc = tier_color(tok_total)
-    tc = cost_color(total_cost_val)
+    final_cost = None if has_unknown_cost else total_cost_val
+    tc = cost_color(final_cost)
     print(f"  {bar('├', '┼', '┤')}")
-    print(f"  {row(f'Total ({len(sorted_projects)})', total_sessions, '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), fmt_tokens(tok_total), fmt_cost_col(total_cost_val), colors=[255, 183, 0, 72, 136, 209, ttc, tc], is_bold=True)}")
+    print(f"  {row(f'Total ({len(sorted_projects)})', total_sessions, '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), fmt_tokens(tok_total), fmt_cost_col(final_cost), colors=[255, 183, 0, 72, 136, 209, ttc, tc], is_bold=True)}")
     print(f"  {bar('└', '┴', '┘')}")
 
     if len(grand_by_model) > 1:
@@ -752,6 +753,7 @@ def print_daily(daily: dict[str, dict[str, dict]], days: int):
 
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_cost_val = 0.0
+    has_unknown_cost = False
     total_tok = 0
 
     for day in sorted(daily):
@@ -779,18 +781,19 @@ def print_daily(daily: dict[str, dict[str, dict]], days: int):
         if c_val is not None:
             total_cost_val += c_val
         else:
-            total_cost_val = None
+            has_unknown_cost = True
         total_tok += tok
 
     grand_totals = _empty_bucket()
     for d in grand_by_model.values():
         merge_buckets(grand_totals, d)
-    tc = cost_color(total_cost_val)
+    final_cost = None if has_unknown_cost else total_cost_val
+    tc = cost_color(final_cost)
     cp_total = cache_pct(grand_totals)
     cp_tc = 78 if cp_total >= 80 else (228 if cp_total >= 50 else 196)
     ttc = tier_color(total_tok)
     print(f"  {bar('├', '┼', '┤')}")
-    print(f"  {row('Total', grand_totals['calls'], '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), f'{cp_total:.0f}%', fmt_tokens(total_tok), fmt_cost_col(total_cost_val), colors=[255, 183, 0, 72, 136, 209, cp_tc, ttc, tc], is_bold=True)}")
+    print(f"  {row('Total', grand_totals['calls'], '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), f'{cp_total:.0f}%', fmt_tokens(total_tok), fmt_cost_col(final_cost), colors=[255, 183, 0, 72, 136, 209, cp_tc, ttc, tc], is_bold=True)}")
     print(f"  {bar('└', '┴', '┘')}")
 
     print()
@@ -810,6 +813,7 @@ def print_markdown(daily: dict[str, dict[str, dict]], days: int) -> str:
 
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_cost_val = 0.0
+    has_unknown_cost = False
     total_tok = 0
 
     for day in sorted(daily):
@@ -822,24 +826,27 @@ def print_markdown(daily: dict[str, dict[str, dict]], days: int) -> str:
         cp = cache_pct(day_totals)
         models_used = sorted(by_model.keys(), key=lambda m: total_tokens(by_model[m]), reverse=True)
         model_str = ", ".join(model_label(m) for m in models_used)
+        cost_str = f"${c_val:.2f}" if c_val is not None else "n/a"
         lines.append(f"| {day} | {day_totals['calls']} | {model_str} | {fmt_tokens(day_totals['cache_read'])} "
                      f"| {fmt_tokens(day_totals['cache_write'])} | {fmt_tokens(day_totals['output'])} | {cp:.0f}% "
-                     f"| {fmt_tokens(tok)} | ${c_val:.2f} |")
+                     f"| {fmt_tokens(tok)} | {cost_str} |")
         for model, d in by_model.items():
             merge_buckets(grand_by_model[model], d)
         if c_val is not None:
             total_cost_val += c_val
         else:
-            total_cost_val = None
+            has_unknown_cost = True
         total_tok += tok
 
     grand_totals = _empty_bucket()
     for d in grand_by_model.values():
         merge_buckets(grand_totals, d)
     cp_total = cache_pct(grand_totals)
+    final_cost = None if has_unknown_cost else total_cost_val
+    total_cost_str = f"${final_cost:.2f}" if final_cost is not None else "n/a"
     lines.append(f"| **Total** | **{grand_totals['calls']}** | | **{fmt_tokens(grand_totals['cache_read'])}** "
                  f"| **{fmt_tokens(grand_totals['cache_write'])}** | **{fmt_tokens(grand_totals['output'])}** | **{cp_total:.0f}%** "
-                 f"| **{fmt_tokens(total_tok)}** | **${total_cost_val:.2f}** |")
+                 f"| **{fmt_tokens(total_tok)}** | **{total_cost_str}** |")
     lines.append("")
     lines.append("### Per-model breakdown")
     lines.append("")
@@ -850,9 +857,10 @@ def print_markdown(daily: dict[str, dict[str, dict]], days: int) -> str:
         label = model_label(model)
         c_val = cost_for_model(d, model)
         tok = total_tokens(d)
+        cost_str = f"${c_val:.2f}" if c_val is not None else "n/a"
         lines.append(f"| {label} | {d['calls']} | {fmt_tokens(d['cache_read'])} "
                      f"| {fmt_tokens(d['cache_write'])} | {fmt_tokens(d['output'])} "
-                     f"| {fmt_tokens(tok)} | ${c_val:.2f} |")
+                     f"| {fmt_tokens(tok)} | {cost_str} |")
 
     output = "\n".join(lines)
     print(output)
@@ -1042,7 +1050,7 @@ def _safe_state_path(session_id: str) -> Path | None:
     return path
 
 
-def _atomic_write(path: Path, data: str):
+def _write_state(path: Path, data: str):
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, data.encode())
@@ -1102,7 +1110,7 @@ def run_hook():
     turn_cost = sum(m["cost"] for m in turn_models.values())
     turn_tok = sum(m["tokens"] for m in turn_models.values())
 
-    _atomic_write(state_file, json.dumps({
+    _write_state(state_file, json.dumps({
         "cost": session_cost, "tokens": session_tok,
         "last_cost": turn_cost, "last_tok": turn_tok,
         "by_model": session_models,
@@ -1193,7 +1201,7 @@ examples:
     parser.add_argument("--update-pricing", action="store_true",
         help="Force-refresh model pricing from Anthropic")
     parser.add_argument("--markdown", action="store_true", help="Output as markdown table")
-    parser.add_argument("--copy", action="store_true", help="Copy output to clipboard (macOS pbcopy)")
+    parser.add_argument("--copy", action="store_true", help="Copy output to clipboard")
     args = parser.parse_args()
 
     if args.session_start:

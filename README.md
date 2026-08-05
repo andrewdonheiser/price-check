@@ -2,6 +2,8 @@
 
 A CLI tool that scans local Claude Code JSONL session files and reports token usage and estimated costs, broken down by model, speed, and reasoning effort.
 
+<img width="901" height="226" alt="Screenshot 2026-08-04 at 8 16 49 PM" src="https://github.com/user-attachments/assets/731207cd-16eb-4f28-a9d5-951c2afc8360" />
+
 ## Features
 
 - **Per-model cost tracking** with correct rates for all Claude models (Opus, Sonnet, Haiku, Fable, Mythos)
