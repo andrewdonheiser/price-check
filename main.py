@@ -19,10 +19,17 @@ import tempfile
 import urllib.request
 import urllib.error
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 
 MAX_JSONL_SIZE = 100 * 1024 * 1024  # 100 MB
+_SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
+_TAG_ABBREV = {"standard": "std", "medium": "med", "high": "hi", "fast": "fast"}
+
+
+def _abbrev_tag(tag: str) -> str:
+    return _TAG_ABBREV.get(tag, tag)
+
 
 PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 PRICING_FILE = Path.home() / ".claude" / "price-check-rates.json"
@@ -288,6 +295,54 @@ def merge_buckets(target: dict, source: dict):
         target[k] += source[k]
 
 
+def _variant_key(model: str, speed: str, effort: str) -> str:
+    return f"{model}\t{speed}\t{effort}"
+
+
+def _base_model(key: str) -> str:
+    return key.split("\t")[0]
+
+
+def _merge_to_model(by_variant: dict[str, dict]) -> dict[str, dict]:
+    by_model: dict[str, dict] = defaultdict(_new_model_bucket)
+    for key, bucket in by_variant.items():
+        model = _base_model(key)
+        merge_buckets(by_model[model], bucket)
+        for s, cnt in bucket.get("speeds", {}).items():
+            by_model[model]["speeds"][s] += cnt
+        for e, cnt in bucket.get("efforts", {}).items():
+            by_model[model]["efforts"][e] += cnt
+    return dict(by_model)
+
+
+def _aggregate_for_dates(daily: dict[str, dict[str, dict]], target_dates: set[str]) -> dict[str, dict]:
+    merged: dict[str, dict] = defaultdict(_new_model_bucket)
+    for day, by_model in daily.items():
+        if day not in target_dates:
+            continue
+        for model, d in by_model.items():
+            merge_buckets(merged[model], d)
+            for s, cnt in d.get("speeds", {}).items():
+                merged[model]["speeds"][s] += cnt
+            for e, cnt in d.get("efforts", {}).items():
+                merged[model]["efforts"][e] += cnt
+    return dict(merged)
+
+
+def _period_date_sets() -> tuple[set[str], set[str], set[str]]:
+    today = datetime.now().date()
+    today_set = {today.isoformat()}
+    monday = today - timedelta(days=today.weekday())
+    week_set = {(monday + timedelta(days=i)).isoformat() for i in range(7)}
+    month_start = today.replace(day=1)
+    month_set = set()
+    d = month_start
+    while d.month == today.month:
+        month_set.add(d.isoformat())
+        d += timedelta(days=1)
+    return today_set, week_set, month_set
+
+
 def fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
@@ -353,13 +408,24 @@ def model_color(label: str) -> int:
     return MODEL_COLORS.get(label, 245)
 
 
+def _is_system_prompt(obj: dict) -> bool:
+    msg_content = (obj.get("message") or {}).get("content", "")
+    if isinstance(msg_content, list):
+        msg_content = (msg_content[0].get("text", "")
+                       if msg_content and isinstance(msg_content[0], dict) else "")
+    return isinstance(msg_content, str) and any(
+        msg_content.lstrip().startswith(p) for p in _SYSTEM_PREFIXES
+    )
+
+
 # ── Scanners ──────────────────────────────────────────────────────────
 
-def scan_jsonl_files(days: int) -> dict[str, dict[str, dict]]:
+def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, int]]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     cutoff_ts = cutoff.timestamp()
 
-    daily: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_empty_bucket))
+    daily: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_new_model_bucket))
+    daily_prompt_ids: dict[str, set[str]] = defaultdict(set)
     seen: set[str] = set()
 
     for jsonl in PROJECTS_DIR.rglob("*.jsonl"):
@@ -369,13 +435,32 @@ def scan_jsonl_files(days: int) -> dict[str, dict[str, dict]]:
             continue
         if stat.st_mtime < cutoff_ts or stat.st_size > MAX_JSONL_SIZE:
             continue
+        system_pids: set[str] = set()
         with jsonl.open() as f:
             for line in f:
-                if '"usage"' not in line:
+                has_usage = '"usage"' in line
+                has_pid = '"promptId"' in line
+                if not has_usage and not has_pid:
                     continue
                 try:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
+                    continue
+                if has_pid:
+                    pid = obj.get("promptId")
+                    if pid and _is_system_prompt(obj):
+                        system_pids.add(pid)
+                    ts_str = obj.get("timestamp")
+                    if pid and ts_str and pid not in system_pids:
+                        try:
+                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                        else:
+                            if ts >= cutoff:
+                                day = ts.astimezone().strftime("%Y-%m-%d")
+                                daily_prompt_ids[day].add(pid)
+                if not has_usage:
                     continue
                 req_id = obj.get("requestId")
                 if not req_id or req_id in seen:
@@ -396,13 +481,13 @@ def scan_jsonl_files(days: int) -> dict[str, dict[str, dict]]:
                     continue
                 day = ts.astimezone().strftime("%Y-%m-%d")
                 model = msg.get("model", "unknown")
-                daily[day][model]["calls"] += 1
-                daily[day][model]["input"] += usage.get("input_tokens", 0)
-                daily[day][model]["output"] += usage.get("output_tokens", 0)
-                daily[day][model]["cache_read"] += usage.get("cache_read_input_tokens", 0)
-                daily[day][model]["cache_write"] += usage.get("cache_creation_input_tokens", 0)
+                speed = usage.get("speed", "")
+                effort = obj.get("effort", "")
+                vkey = _variant_key(model, speed, effort)
+                _accumulate(daily[day][vkey], usage, speed, effort)
 
-    return dict(daily)
+    daily_turns = {day: len(pids) for day, pids in daily_prompt_ids.items()}
+    return dict(daily), daily_turns
 
 
 def scan_session_data(days: int, date_filter: str = None) -> dict[str, dict]:
@@ -738,29 +823,85 @@ def print_projects_summary(session_data: dict[str, dict], days: int):
     print()
 
 
-def print_daily(daily: dict[str, dict[str, dict]], days: int):
-    W = [12, 6, 12, 9, 9, 8, 6, 8, 9]
+def print_daily(daily: dict[str, dict[str, dict]], days: int, daily_turns: dict[str, int] | None = None):
+    W = [12, 6, 6, 12, 9, 9, 8, 6, 8, 9]
     bar, row = _table_helpers(W)
 
     print()
     print(f"  \U0001f52c {bold(c(75, 'Claude Code Token Usage'))}  {dim(f'(last {days} days)')}")
     print()
 
-    hdr_c = [252] * 9
+    hdr_c = [252] * 10
     print(f"  {bar('┌', '┬', '┐')}")
-    print(f"  {row('Date', 'Calls', 'Model(s)', 'CacheRd', 'CacheWr', 'LLM', 'Hit%', 'Total', 'Cost', colors=hdr_c, is_bold=True)}")
+    print(f"  {row('Date', 'Calls', 'Turns', 'Model(s)', 'CacheRd', 'CacheWr', 'LLM', 'Hit%', 'Total', 'Cost', colors=hdr_c, is_bold=True)}")
     print(f"  {bar('├', '┼', '┤')}")
 
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_cost_val = 0.0
     has_unknown_cost = False
     total_tok = 0
+    total_turns = 0
 
-    for day in sorted(daily):
-        by_model = daily[day]
+    show_week_sub = days >= 7
+    show_month_sub = days >= 28
+
+    week_by_model: dict[str, dict] = defaultdict(_empty_bucket)
+    week_cost = 0.0
+    week_unknown = False
+    week_tok = 0
+    week_turns = 0
+    prev_week_key = None
+
+    month_by_model: dict[str, dict] = defaultdict(_empty_bucket)
+    month_cost = 0.0
+    month_unknown = False
+    month_tok = 0
+    month_turns = 0
+    prev_month_key = None
+
+    def _print_subtotal(label, sub_by_model, sub_cost, sub_unknown, sub_tok, sub_turns):
+        sub_totals = _empty_bucket()
+        for sd in sub_by_model.values():
+            merge_buckets(sub_totals, sd)
+        sc = None if sub_unknown else sub_cost
+        scc = cost_color(sc)
+        scp = cache_pct(sub_totals)
+        scp_c = 78 if scp >= 80 else (228 if scp >= 50 else 196)
+        stc = tier_color(sub_tok)
+        gray = 244
+        print(f"  {bar('├', '┼', '┤')}")
+        print(f"  {row(label, sub_totals['calls'], sub_turns, '', fmt_tokens(sub_totals['cache_read']), fmt_tokens(sub_totals['cache_write']), fmt_tokens(sub_totals['output']), f'{scp:.0f}%', fmt_tokens(sub_tok), fmt_cost_col(sc), colors=[gray, gray, gray, gray, 72, 136, 209, scp_c, stc, scc])}")
+
+    sorted_days = sorted(daily)
+    for day in sorted_days:
+
+        d = _date.fromisoformat(day)
+        week_key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+        month_key = day[:7]
+
+        if show_week_sub and prev_week_key and week_key != prev_week_key:
+            _print_subtotal(f"  {prev_week_key}", week_by_model, week_cost, week_unknown, week_tok, week_turns)
+            week_by_model = defaultdict(_empty_bucket)
+            week_cost = 0.0
+            week_unknown = False
+            week_tok = 0
+            week_turns = 0
+
+        if show_month_sub and prev_month_key and month_key != prev_month_key:
+            _print_subtotal(f"  {prev_month_key}", month_by_model, month_cost, month_unknown, month_tok, month_turns)
+            month_by_model = defaultdict(_empty_bucket)
+            month_cost = 0.0
+            month_unknown = False
+            month_tok = 0
+            month_turns = 0
+
+        prev_week_key = week_key
+        prev_month_key = month_key
+
+        by_model = _merge_to_model(daily[day])
         day_totals = _empty_bucket()
-        for d in by_model.values():
-            merge_buckets(day_totals, d)
+        for dd in by_model.values():
+            merge_buckets(day_totals, dd)
         c_val = cost_for_buckets(by_model)
         cc = cost_color(c_val)
         tok = total_tokens(day_totals)
@@ -771,29 +912,46 @@ def print_daily(daily: dict[str, dict[str, dict]], days: int):
         model_str = ", ".join(model_label(m) for m in models_used)
         if len(model_str) > 12:
             model_str = model_str[:10] + ".."
-        print(f"  {row(day, day_totals['calls'], model_str, fmt_tokens(day_totals['cache_read']), fmt_tokens(day_totals['cache_write']), fmt_tokens(day_totals['output']), f'{cp:.0f}%', fmt_tokens(tok), fmt_cost_col(c_val), colors=[117, 183, 75, 72, 136, 209, cp_c, tc_col, cc])}")
+        dt = daily_turns.get(day, 0) if daily_turns else 0
+        print(f"  {row(day, day_totals['calls'], dt, model_str, fmt_tokens(day_totals['cache_read']), fmt_tokens(day_totals['cache_write']), fmt_tokens(day_totals['output']), f'{cp:.0f}%', fmt_tokens(tok), fmt_cost_col(c_val), colors=[117, 183, 183, 75, 72, 136, 209, cp_c, tc_col, cc])}")
 
         if len(by_model) > 1:
             _print_model_breakdown(by_model, indent="     ")
 
-        for model, d in by_model.items():
-            merge_buckets(grand_by_model[model], d)
+        for model, dd in by_model.items():
+            merge_buckets(grand_by_model[model], dd)
+            merge_buckets(week_by_model[model], dd)
+            merge_buckets(month_by_model[model], dd)
         if c_val is not None:
             total_cost_val += c_val
+            week_cost += c_val
+            month_cost += c_val
         else:
             has_unknown_cost = True
+            week_unknown = True
+            month_unknown = True
         total_tok += tok
+        week_tok += tok
+        month_tok += tok
+        total_turns += dt
+        week_turns += dt
+        month_turns += dt
+
+    if show_week_sub and prev_week_key:
+        _print_subtotal(f"  {prev_week_key}", week_by_model, week_cost, week_unknown, week_tok, week_turns)
+    if show_month_sub and prev_month_key:
+        _print_subtotal(f"  {prev_month_key}", month_by_model, month_cost, month_unknown, month_tok, month_turns)
 
     grand_totals = _empty_bucket()
-    for d in grand_by_model.values():
-        merge_buckets(grand_totals, d)
+    for dd in grand_by_model.values():
+        merge_buckets(grand_totals, dd)
     final_cost = None if has_unknown_cost else total_cost_val
     tc = cost_color(final_cost)
     cp_total = cache_pct(grand_totals)
     cp_tc = 78 if cp_total >= 80 else (228 if cp_total >= 50 else 196)
     ttc = tier_color(total_tok)
     print(f"  {bar('├', '┼', '┤')}")
-    print(f"  {row('Total', grand_totals['calls'], '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), f'{cp_total:.0f}%', fmt_tokens(total_tok), fmt_cost_col(final_cost), colors=[255, 183, 0, 72, 136, 209, cp_tc, ttc, tc], is_bold=True)}")
+    print(f"  {row('Total', grand_totals['calls'], total_turns, '', fmt_tokens(grand_totals['cache_read']), fmt_tokens(grand_totals['cache_write']), fmt_tokens(grand_totals['output']), f'{cp_total:.0f}%', fmt_tokens(total_tok), fmt_cost_col(final_cost), colors=[255, 183, 183, 0, 72, 136, 209, cp_tc, ttc, tc], is_bold=True)}")
     print(f"  {bar('└', '┴', '┘')}")
 
     print()
@@ -804,47 +962,117 @@ def print_daily(daily: dict[str, dict[str, dict]], days: int):
     print()
 
 
-def print_markdown(daily: dict[str, dict[str, dict]], days: int) -> str:
+def print_markdown(daily: dict[str, dict[str, dict]], days: int, daily_turns: dict[str, int] | None = None) -> str:
     lines = []
     lines.append(f"## Token Usage (last {days} days)")
     lines.append("")
-    lines.append("| Date | Calls | Model(s) | CacheRd | CacheWr | LLM | Hit% | Total | Cost |")
-    lines.append("|------|-------|----------|---------|---------|-----|------|-------|------|")
+    lines.append("| Date | Calls | Turns | Model(s) | CacheRd | CacheWr | LLM | Hit% | Total | Cost |")
+    lines.append("|------|-------|-------|----------|---------|---------|-----|------|-------|------|")
 
     grand_by_model: dict[str, dict] = defaultdict(_empty_bucket)
     total_cost_val = 0.0
     has_unknown_cost = False
     total_tok = 0
+    total_turns = 0
+
+    show_week_sub = days >= 7
+    show_month_sub = days >= 28
+
+    week_by_model: dict[str, dict] = defaultdict(_empty_bucket)
+    week_cost = 0.0
+    week_unknown = False
+    week_tok = 0
+    week_turns = 0
+    prev_week_key = None
+
+    month_by_model: dict[str, dict] = defaultdict(_empty_bucket)
+    month_cost = 0.0
+    month_unknown = False
+    month_tok = 0
+    month_turns = 0
+    prev_month_key = None
+
+    def _md_subtotal(label, sub_by_model, sub_cost, sub_unknown, sub_tok, sub_turns):
+        sub_totals = _empty_bucket()
+        for sd in sub_by_model.values():
+            merge_buckets(sub_totals, sd)
+        sc = None if sub_unknown else sub_cost
+        cost_s = f"${sc:.2f}" if sc is not None else "n/a"
+        scp = cache_pct(sub_totals)
+        lines.append(f"| *{label}* | *{sub_totals['calls']}* | *{sub_turns}* | | *{fmt_tokens(sub_totals['cache_read'])}* "
+                     f"| *{fmt_tokens(sub_totals['cache_write'])}* | *{fmt_tokens(sub_totals['output'])}* | *{scp:.0f}%* "
+                     f"| *{fmt_tokens(sub_tok)}* | *{cost_s}* |")
 
     for day in sorted(daily):
-        by_model = daily[day]
+
+        d = _date.fromisoformat(day)
+        week_key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+        month_key = day[:7]
+
+        if show_week_sub and prev_week_key and week_key != prev_week_key:
+            _md_subtotal(prev_week_key, week_by_model, week_cost, week_unknown, week_tok, week_turns)
+            week_by_model = defaultdict(_empty_bucket)
+            week_cost = 0.0
+            week_unknown = False
+            week_tok = 0
+            week_turns = 0
+
+        if show_month_sub and prev_month_key and month_key != prev_month_key:
+            _md_subtotal(prev_month_key, month_by_model, month_cost, month_unknown, month_tok, month_turns)
+            month_by_model = defaultdict(_empty_bucket)
+            month_cost = 0.0
+            month_unknown = False
+            month_tok = 0
+            month_turns = 0
+
+        prev_week_key = week_key
+        prev_month_key = month_key
+
+        by_model = _merge_to_model(daily[day])
         day_totals = _empty_bucket()
-        for d in by_model.values():
-            merge_buckets(day_totals, d)
+        for dd in by_model.values():
+            merge_buckets(day_totals, dd)
         c_val = cost_for_buckets(by_model)
         tok = total_tokens(day_totals)
         cp = cache_pct(day_totals)
         models_used = sorted(by_model.keys(), key=lambda m: total_tokens(by_model[m]), reverse=True)
         model_str = ", ".join(model_label(m) for m in models_used)
         cost_str = f"${c_val:.2f}" if c_val is not None else "n/a"
-        lines.append(f"| {day} | {day_totals['calls']} | {model_str} | {fmt_tokens(day_totals['cache_read'])} "
+        dt = daily_turns.get(day, 0) if daily_turns else 0
+        lines.append(f"| {day} | {day_totals['calls']} | {dt} | {model_str} | {fmt_tokens(day_totals['cache_read'])} "
                      f"| {fmt_tokens(day_totals['cache_write'])} | {fmt_tokens(day_totals['output'])} | {cp:.0f}% "
                      f"| {fmt_tokens(tok)} | {cost_str} |")
-        for model, d in by_model.items():
-            merge_buckets(grand_by_model[model], d)
+        for model, dd in by_model.items():
+            merge_buckets(grand_by_model[model], dd)
+            merge_buckets(week_by_model[model], dd)
+            merge_buckets(month_by_model[model], dd)
         if c_val is not None:
             total_cost_val += c_val
+            week_cost += c_val
+            month_cost += c_val
         else:
             has_unknown_cost = True
+            week_unknown = True
+            month_unknown = True
         total_tok += tok
+        week_tok += tok
+        month_tok += tok
+        total_turns += dt
+        week_turns += dt
+        month_turns += dt
+
+    if show_week_sub and prev_week_key:
+        _md_subtotal(prev_week_key, week_by_model, week_cost, week_unknown, week_tok, week_turns)
+    if show_month_sub and prev_month_key:
+        _md_subtotal(prev_month_key, month_by_model, month_cost, month_unknown, month_tok, month_turns)
 
     grand_totals = _empty_bucket()
-    for d in grand_by_model.values():
-        merge_buckets(grand_totals, d)
+    for dd in grand_by_model.values():
+        merge_buckets(grand_totals, dd)
     cp_total = cache_pct(grand_totals)
     final_cost = None if has_unknown_cost else total_cost_val
     total_cost_str = f"${final_cost:.2f}" if final_cost is not None else "n/a"
-    lines.append(f"| **Total** | **{grand_totals['calls']}** | | **{fmt_tokens(grand_totals['cache_read'])}** "
+    lines.append(f"| **Total** | **{grand_totals['calls']}** | **{total_turns}** | | **{fmt_tokens(grand_totals['cache_read'])}** "
                  f"| **{fmt_tokens(grand_totals['cache_write'])}** | **{fmt_tokens(grand_totals['output'])}** | **{cp_total:.0f}%** "
                  f"| **{fmt_tokens(total_tok)}** | **{total_cost_str}** |")
     lines.append("")
@@ -853,13 +1081,13 @@ def print_markdown(daily: dict[str, dict[str, dict]], days: int) -> str:
     lines.append("| Model | Calls | CacheRd | CacheWr | LLM | Total | Cost |")
     lines.append("|-------|-------|---------|---------|-----|-------|------|")
     for model in sorted(grand_by_model, key=lambda m: total_tokens(grand_by_model[m]), reverse=True):
-        d = grand_by_model[model]
+        dd = grand_by_model[model]
         label = model_label(model)
-        c_val = cost_for_model(d, model)
-        tok = total_tokens(d)
+        c_val = cost_for_model(dd, model)
+        tok = total_tokens(dd)
         cost_str = f"${c_val:.2f}" if c_val is not None else "n/a"
-        lines.append(f"| {label} | {d['calls']} | {fmt_tokens(d['cache_read'])} "
-                     f"| {fmt_tokens(d['cache_write'])} | {fmt_tokens(d['output'])} "
+        lines.append(f"| {label} | {dd['calls']} | {fmt_tokens(dd['cache_read'])} "
+                     f"| {fmt_tokens(dd['cache_write'])} | {fmt_tokens(dd['output'])} "
                      f"| {fmt_tokens(tok)} | {cost_str} |")
 
     output = "\n".join(lines)
@@ -924,14 +1152,8 @@ def _accumulate(bucket: dict, usage: dict, speed: str = "", effort: str = ""):
         bucket["efforts"][effort] += 1
 
 
-def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
-    """Returns (by_model, by_agent, last_by_model, last_agents).
-
-    by_model / by_agent: cumulative session totals.
-    last_by_model / last_agents: totals for the latest prompt only,
-    identified via promptId boundaries in the JSONL.
-    by_agent / last_agents count subagent *files* (invocations), not API calls.
-    """
+def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
+    """Returns (by_model, by_agent, last_by_model, last_agents, turn_count)."""
     seen: set[str] = set()
     by_model: dict[str, dict] = defaultdict(_new_model_bucket)
     last_by_model: dict[str, dict] = defaultdict(_new_model_bucket)
@@ -944,14 +1166,15 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
         subagent_files = list(subagents_dir.rglob("agent-*.jsonl"))
 
     latest_prompt_id = None
-    _SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
     system_pids: set[str] = set()
 
     # ── main session file ──
+    all_prompt_ids: set[str] = set()
+
     try:
         fh = jsonl_path.open()
     except OSError:
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, 0
     with fh:
         for line in fh:
             if '"usage"' not in line and '"promptId"' not in line:
@@ -962,17 +1185,13 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
                 continue
             pid = obj.get("promptId")
             if pid and pid != latest_prompt_id and pid not in system_pids:
-                msg_content = (obj.get("message") or {}).get("content", "")
-                if isinstance(msg_content, list):
-                    msg_content = (msg_content[0].get("text", "")
-                                   if msg_content and isinstance(msg_content[0], dict) else "")
-                if isinstance(msg_content, str) and any(
-                    msg_content.lstrip().startswith(p) for p in _SYSTEM_PREFIXES
-                ):
+                if _is_system_prompt(obj):
                     system_pids.add(pid)
                 else:
                     latest_prompt_id = pid
                     last_by_model = defaultdict(_new_model_bucket)
+            if pid and pid not in system_pids:
+                all_prompt_ids.add(pid)
             req_id = obj.get("requestId")
             if not req_id or req_id in seen:
                 continue
@@ -1038,7 +1257,7 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict]:
                 for e, cnt in fu["efforts"].items():
                     lm["efforts"][e] += cnt
 
-    return dict(by_model), dict(by_agent), dict(last_by_model), dict(last_agents)
+    return dict(by_model), dict(by_agent), dict(last_by_model), dict(last_agents), len(all_prompt_ids)
 
 
 def _safe_state_path(session_id: str) -> Path | None:
@@ -1067,7 +1286,6 @@ def run_session_start():
 
 
 def run_hook():
-    _ensure_pricing()
     try:
         hook_input = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, ValueError):
@@ -1077,28 +1295,48 @@ def run_hook():
     if not session_id:
         sys.exit(0)
 
-    jsonl_path = _find_session_jsonl(session_id, hook_input.get("cwd", ""))
-    if not jsonl_path:
-        sys.exit(0)
-
-    by_model, by_agent, last_by_model, last_agents = _scan_session_usage(jsonl_path)
-    if not by_model:
+    state = _compute_state(session_id, hook_input.get("cwd", ""))
+    if not state:
         sys.exit(0)
 
     state_file = _safe_state_path(session_id)
     if not state_file:
         sys.exit(0)
 
-    def _build_display(raw: dict) -> dict:
+    _write_state(state_file, json.dumps(state))
+
+
+def _compute_state(session_id: str, cwd: str = "") -> dict | None:
+    """Scan session JSONL and return state dict (same shape as run_hook writes)."""
+    _ensure_pricing()
+    jsonl_path = _find_session_jsonl(session_id, cwd)
+    if jsonl_path:
+        by_model, by_agent, last_by_model, last_agents, session_turns = _scan_session_usage(jsonl_path)
+    else:
+        by_model, by_agent, last_by_model, last_agents, session_turns = {}, {}, {}, {}, 0
+
+    def _build_display(raw: dict, all_tags: bool = False) -> dict:
         out = {}
         for m, d in raw.items():
             if d["calls"] <= 0:
                 continue
-            label = model_label(m)
-            out[label] = {
-                "cost": cost_for_model(d, m), "tokens": total_tokens(d),
-                "calls": d["calls"], "speed": _dominant(d.get("speeds", {})),
-                "effort": _dominant(d.get("efforts", {})),
+            if all_tags:
+                model = _base_model(m)
+                parts = m.split("\t")
+                speed_val = parts[1] if len(parts) > 1 else ""
+                effort_val = parts[2] if len(parts) > 2 else ""
+                label = model_label(model)
+                tag_parts = [_abbrev_tag(t) for t in [speed_val, effort_val] if t]
+                display_key = f"{label} [{','.join(tag_parts)}]" if tag_parts else label
+            else:
+                model = m
+                speed_val = _dominant(d.get("speeds", {}))
+                effort_val = _dominant(d.get("efforts", {}))
+                display_key = model_label(model)
+            out[display_key] = {
+                "cost": cost_for_model(d, model), "tokens": total_tokens(d),
+                "calls": d["calls"], "speed": _abbrev_tag(speed_val),
+                "effort": _abbrev_tag(effort_val),
             }
         return out
 
@@ -1110,14 +1348,35 @@ def run_hook():
     turn_cost = sum(m["cost"] for m in turn_models.values())
     turn_tok = sum(m["tokens"] for m in turn_models.values())
 
-    _write_state(state_file, json.dumps({
+    daily, daily_turns = scan_jsonl_files(31)
+    today_set, week_set, month_set = _period_date_sets()
+
+    today_by_model = _build_display(_aggregate_for_dates(daily, today_set), all_tags=True)
+    week_by_model = _build_display(_aggregate_for_dates(daily, week_set), all_tags=True)
+    month_by_model = _build_display(_aggregate_for_dates(daily, month_set), all_tags=True)
+
+    today_turns = sum(daily_turns.get(d, 0) for d in today_set)
+    week_turns = sum(daily_turns.get(d, 0) for d in week_set)
+    month_turns = sum(daily_turns.get(d, 0) for d in month_set)
+
+    return {
         "cost": session_cost, "tokens": session_tok,
         "last_cost": turn_cost, "last_tok": turn_tok,
         "by_model": session_models,
         "last_by_model": turn_models,
         "agents": dict(by_agent),
         "last_agents": dict(last_agents),
-    }))
+        "today_by_model": today_by_model,
+        "week_by_model": week_by_model,
+        "month_by_model": month_by_model,
+        "turns": {
+            "prompt": 1 if turn_models else 0,
+            "session": session_turns,
+            "today": today_turns,
+            "week": week_turns,
+            "month": month_turns,
+        },
+    }
 
 
 def run_status_line():
@@ -1131,14 +1390,15 @@ def run_status_line():
         sys.exit(0)
 
     state_file = _safe_state_path(session_id)
-    if not state_file:
-        print("$0.00")
-        return
-    try:
-        state = json.loads(state_file.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        print("$0.00")
-        return
+    state = None
+    if state_file:
+        try:
+            state = json.loads(state_file.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            pass
+
+    if not state or not state.get("by_model"):
+        state = _compute_state(session_id, ctx.get("cwd", ""))
 
     def _fmt_model_line(models: dict, prefix: str, agents: dict | None = None) -> str:
         total_cost = sum(m.get("cost", 0) for m in models.values())
@@ -1157,6 +1417,14 @@ def run_status_line():
                 parts.append(f"agents: {', '.join(agent_parts)}")
         return f"{prefix}: {' | '.join(parts)}" if parts else f"{prefix}: {fmt_cost(total_cost)}"
 
+    def _fmt_period_line(models: dict, prefix: str) -> str:
+        parts = []
+        for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
+            mc = models[label]
+            parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])})")
+        total_cost = sum(m.get("cost", 0) for m in models.values())
+        return f"{prefix}: {' | '.join(parts)}" if parts else f"{prefix}: {fmt_cost(total_cost)}"
+
     last_by_model = state.get("last_by_model", {})
     by_model = state.get("by_model", {})
     last_agents = state.get("last_agents", {})
@@ -1164,6 +1432,21 @@ def run_status_line():
 
     print(_fmt_model_line(last_by_model, "Prompt", last_agents) if last_by_model else f"Prompt: {fmt_cost(state.get('last_cost', 0))}")
     print(_fmt_model_line(by_model, "Session", session_agents))
+
+    for key, label in [("today_by_model", "Today"), ("week_by_model", "Week"), ("month_by_model", "Month")]:
+        period = state.get(key, {})
+        if period:
+            print(_fmt_period_line(period, label))
+
+    turns = state.get("turns", {})
+    if turns:
+        parts = []
+        for k, label in [("prompt", "prompt"), ("session", "session"), ("today", "today"), ("week", "week"), ("month", "month")]:
+            v = turns.get(k, 0)
+            if v:
+                parts.append(f"{fmt_tokens(v)} ({label})")
+        if parts:
+            print(f"Turns: {' | '.join(parts)}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -1248,16 +1531,16 @@ examples:
             sys.exit(0)
         print_projects_summary(session_data, args.days)
     else:
-        daily = scan_jsonl_files(args.days)
+        daily, daily_turns = scan_jsonl_files(args.days)
         if not daily:
             print(f"No data found for the last {args.days} days.")
             sys.exit(0)
         if args.markdown:
-            output = print_markdown(daily, args.days)
+            output = print_markdown(daily, args.days, daily_turns)
             if args.copy:
                 copy_to_clipboard(output)
         else:
-            print_daily(daily, args.days)
+            print_daily(daily, args.days, daily_turns)
             if args.copy:
-                output = print_markdown(daily, args.days)
+                output = print_markdown(daily, args.days, daily_turns)
                 copy_to_clipboard(output)

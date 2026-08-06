@@ -9,13 +9,17 @@ A CLI tool that scans local Claude Code JSONL session files and reports token us
 - **Per-model cost tracking** with correct rates for all Claude models (Opus, Sonnet, Haiku, Fable, Mythos)
 - **Dynamic pricing** — fetches latest rates from Anthropic on session start, no hardcoded values
 - **Daily usage summary** with token breakdown (cache read, cache write, LLM output) and cost estimates
+- **Period totals** — Today, Week, and Month cost aggregates with per-model breakdown in the status line
+- **Turn tracking** — counts unique prompts (turns) per session and per day, shown in the status line and daily table
+- **Period subtotals** — week and month subtotal rows inserted at boundaries in the daily table (week shown at 7+ days, month at 28+)
 - **Per-session drill-down** for any given date, with per-model sub-rows for multi-model sessions
 - **Project-level aggregation** across all sessions
 - **Top projects per day** view
 - **Volume discount** — applies a configurable volume discount (default 13%) to all cost calculations
 - **Per-prompt cost tracking** — status line shows cost for the current prompt (not just the last API call increment), using `promptId` boundaries from the JSONL
 - **Subagent tracking** — discovers subagent JSONL files (including nested `workflows/wf_*/` directories) and displays per-type invocation counts (e.g. `agents: Explore×3, general-purpose×2`)
-- **Claude Code status line** showing per-model prompt and session costs with speed, effort level, and subagent counts
+- **Claude Code status line** showing per-model prompt, session, and period costs with speed, effort tags, and subagent counts
+- **Live status line** — scans session JSONL directly when the Stop hook hasn't fired yet (e.g. plan mode), so costs are never stale
 - **Rates table** — view current pricing for all models with `--rates`
 - **Markdown export** with clipboard copy support (cross-platform: macOS, Linux, Windows)
 
@@ -102,11 +106,15 @@ This gives you:
 
 - **SessionStart hook** — fetches latest model pricing from Anthropic when Claude Code starts
 - **Stop hook** — records per-model token usage after each prompt
-- **Status line** — shows per-model cost breakdown with subagent counts:
+- **Status line** — shows per-model cost breakdown with subagent counts, period totals, and turn counts:
 
   ```
-  Prompt: Opus 4.6: $0.15 (253.2K) [standard,high] | Haiku 4.5: $0.02 (80K) [standard] | agents: Explore×2
-  Session: Opus 4.6: $4.8 (5.2M) [standard,high] | Haiku 4.5: $0.05 (300K) [standard] | agents: Explore×5, general-purpose×3
+  Prompt: Opus 4.6: 15c (253.2K) [std,hi] | Haiku 4.5: 2c (80K) [std] | agents: Explore×2
+  Session: Opus 4.6: $4.8 (5.2M) [std,hi] | Haiku 4.5: 5c (300K) [std] | agents: Explore×5, general-purpose×3
+  Today: Opus 4.6 [std,hi]: $12.30 (10M) | Opus 4.6 [std,med]: $3.20 (2M) | Haiku 4.5: 5c (150K)
+  Week: Opus 4.6 [std,hi]: $70.00 (56M) | Opus 4.6 [std,med]: $15.20 (12M) | Haiku 4.5: 23c (850K)
+  Month: Opus 4.6 [std,hi]: $280.00 (224M) | Opus 4.6 [std,med]: $62.10 (56M) | Haiku 4.5: 91c (3.4M)
+  Turns: 5 (prompt) | 42 (session) | 128 (today) | 890 (week) | 3.2K (month)
   ```
 
 ## Usage
@@ -124,25 +132,29 @@ python3 main.py 30
 ```
   🔬 Claude Code Token Usage  (last 7 days)
 
-  ┌──────────────┬────────┬──────────────┬───────────┬───────────┬──────────┬────────┬──────────┬───────────┐
-  │ Date         │  Calls │     Model(s) │   CacheRd │   CacheWr │      LLM │   Hit% │    Total │      Cost │
-  ├──────────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
-  │ 2026-08-03   │    395 │     Opus 4.6 │     44.1M │      2.6M │   121.0K │   100% │    46.8M │    $41.27 │
-  │ 2026-08-04   │    557 │ Opus 4.6, .. │     54.0M │      1.9M │   196.8K │   100% │    56.0M │    $40.73 │
-     Opus 4.6     calls=501   rd= 53.1M  wr=  1.4M  out=177.6K  tok= 54.8M  cost=$40.03
-     Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.70
-  ├──────────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
-  │ Total        │    952 │              │     98.1M │      4.4M │   317.8K │   100% │   102.8M │    $82.00 │
-  └──────────────┴────────┴──────────────┴───────────┴───────────┴──────────┴────────┴──────────┴───────────┘
+  ┌──────────────┬────────┬────────┬──────────────┬───────────┬───────────┬──────────┬────────┬──────────┬───────────┐
+  │ Date         │  Calls │  Turns │     Model(s) │   CacheRd │   CacheWr │      LLM │   Hit% │    Total │      Cost │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │ 2026-08-03   │    395 │     79 │     Opus 4.6 │     44.1M │      2.6M │   121.0K │   100% │    46.8M │    $35.91 │
+  │ 2026-08-04   │    609 │     94 │ Opus 4.6, .. │     62.5M │      2.0M │   216.9K │   100% │    64.7M │    $40.16 │
+     Opus 4.6     calls=553   rd= 61.7M  wr=  1.5M  out=197.6K  tok= 63.4M  cost=$39.55
+     Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.61
+  │ 2026-08-05   │    775 │    120 │ Opus 4.6, .. │     47.9M │      3.5M │   257.4K │   100% │    51.7M │    $35.04 │
+  │ 2026-08-06   │    210 │     13 │ Opus 4.6, .. │     11.3M │    838.4K │    74.3K │   100% │    12.2M │     $9.92 │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │   2026-W32   │   1989 │    306 │              │    165.9M │      8.9M │   669.6K │   100% │   175.5M │   $121.03 │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │ Total        │   1989 │    306 │              │    165.9M │      8.9M │   669.6K │   100% │   175.5M │   $121.03 │
+  └──────────────┴────────┴────────┴──────────────┴───────────┴───────────┴──────────┴────────┴──────────┴───────────┘
 
   Per-model totals:
-    Opus 4.6     calls=896   rd= 97.3M  wr=  4.0M  out=298.5K  tok=101.6M  cost=$81.30
-    Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.70
+    Opus 4.6     calls=1645  rd=159.4M  wr=  6.5M  out=586.4K  tok=166.5M  cost=$117.44
+    Haiku 4.5    calls=344   rd=  6.5M  wr=  2.4M  out= 83.2K  tok=  9.0M  cost=$3.60
 
   Rates ($/MTok):
     Opus 4.6        in=$5.0     out=$25.0    crd=$0.5     cwr=6.25
     Haiku 4.5       in=$1.0     out=$5.0     crd=$0.1     cwr=1.25
-  Updated: 2026-08-05
+  Updated: 2026-08-06
 ```
 
 ### Sessions for a specific date
