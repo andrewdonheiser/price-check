@@ -9,11 +9,15 @@ A CLI tool that scans local Claude Code JSONL session files and reports token us
 - **Per-model cost tracking** with correct rates for all Claude models (Opus, Sonnet, Haiku, Fable, Mythos)
 - **Dynamic pricing** — fetches latest rates from Anthropic on session start, no hardcoded values
 - **Daily usage summary** with token breakdown (cache read, cache write, LLM output) and cost estimates
+- **Period totals** — Today, Week, and Month cost aggregates with per-model breakdown in the status line
+- **Turn tracking** — counts unique prompts (turns) per session and per day, shown in the status line and daily table
+- **Period subtotals** — week and month subtotal rows inserted at boundaries in the daily table (week shown at 7+ days, month at 28+)
 - **Per-session drill-down** for any given date, with per-model sub-rows for multi-model sessions
 - **Project-level aggregation** across all sessions
 - **Top projects per day** view
 - **Subagent tracking** — picks up Haiku/Sonnet subagent calls from the `subagents/` directory
-- **Claude Code status line** showing per-model prompt and session costs with speed and effort level
+- **Claude Code status line** showing per-model prompt, session, and period costs with speed and effort tags
+- **Live status line** — scans session JSONL directly when the Stop hook hasn't fired yet (e.g. plan mode), so costs are never stale
 - **Rates table** — view current pricing for all models with `--rates`
 - **Markdown export** with clipboard copy support (cross-platform: macOS, Linux, Windows)
 
@@ -100,11 +104,15 @@ This gives you:
 
 - **SessionStart hook** — fetches latest model pricing from Anthropic when Claude Code starts
 - **Stop hook** — records per-model token usage after each turn
-- **Status line** — shows per-model cost breakdown:
+- **Status line** — shows per-model cost breakdown with period totals and turn counts:
 
   ```
   Prompt: Opus 4.6: 15c (253.2K) [standard,high] | Haiku 4.5: 2c (80K) [standard]
   Session: Opus 4.6: $4.8 (5.2M) [standard,high] | Haiku 4.5: 5c (300K) [standard]
+  Today: Opus 4.6: $15.50 (12M) [standard,high] | Haiku 4.5: 5c (150K) [standard]
+  Week: Opus 4.6: $85.20 (68M) [standard,high] | Haiku 4.5: 23c (850K) [standard]
+  Month: Opus 4.6: $342.10 (280M) [standard,high] | Haiku 4.5: 91c (3.4M) [standard]
+  Turns: 5 (prompt) | 42 (session) | 128 (today) | 890 (week) | 3.2K (month)
   ```
 
 ## Usage
@@ -122,25 +130,29 @@ python3 main.py 30
 ```
   🔬 Claude Code Token Usage  (last 7 days)
 
-  ┌──────────────┬────────┬──────────────┬───────────┬───────────┬──────────┬────────┬──────────┬───────────┐
-  │ Date         │  Calls │     Model(s) │   CacheRd │   CacheWr │      LLM │   Hit% │    Total │      Cost │
-  ├──────────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
-  │ 2026-08-03   │    395 │     Opus 4.6 │     44.1M │      2.6M │   121.0K │   100% │    46.8M │    $41.27 │
-  │ 2026-08-04   │    557 │ Opus 4.6, .. │     54.0M │      1.9M │   196.8K │   100% │    56.0M │    $40.73 │
-     Opus 4.6     calls=501   rd= 53.1M  wr=  1.4M  out=177.6K  tok= 54.8M  cost=$40.03
-     Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.70
-  ├──────────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
-  │ Total        │    952 │              │     98.1M │      4.4M │   317.8K │   100% │   102.8M │    $82.00 │
-  └──────────────┴────────┴──────────────┴───────────┴───────────┴──────────┴────────┴──────────┴───────────┘
+  ┌──────────────┬────────┬────────┬──────────────┬───────────┬───────────┬──────────┬────────┬──────────┬───────────┐
+  │ Date         │  Calls │  Turns │     Model(s) │   CacheRd │   CacheWr │      LLM │   Hit% │    Total │      Cost │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │ 2026-08-03   │    395 │     79 │     Opus 4.6 │     44.1M │      2.6M │   121.0K │   100% │    46.8M │    $35.91 │
+  │ 2026-08-04   │    609 │     94 │ Opus 4.6, .. │     62.5M │      2.0M │   216.9K │   100% │    64.7M │    $40.16 │
+     Opus 4.6     calls=553   rd= 61.7M  wr=  1.5M  out=197.6K  tok= 63.4M  cost=$39.55
+     Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.61
+  │ 2026-08-05   │    775 │    120 │ Opus 4.6, .. │     47.9M │      3.5M │   257.4K │   100% │    51.7M │    $35.04 │
+  │ 2026-08-06   │    210 │     13 │ Opus 4.6, .. │     11.3M │    838.4K │    74.3K │   100% │    12.2M │     $9.92 │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │   2026-W32   │   1989 │    306 │              │    165.9M │      8.9M │   669.6K │   100% │   175.5M │   $121.03 │
+  ├──────────────┼────────┼────────┼──────────────┼───────────┼───────────┼──────────┼────────┼──────────┼───────────┤
+  │ Total        │   1989 │    306 │              │    165.9M │      8.9M │   669.6K │   100% │   175.5M │   $121.03 │
+  └──────────────┴────────┴────────┴──────────────┴───────────┴───────────┴──────────┴────────┴──────────┴───────────┘
 
   Per-model totals:
-    Opus 4.6     calls=896   rd= 97.3M  wr=  4.0M  out=298.5K  tok=101.6M  cost=$81.30
-    Haiku 4.5    calls=56    rd=820.4K  wr=415.3K  out= 19.3K  tok=  1.3M  cost=$0.70
+    Opus 4.6     calls=1645  rd=159.4M  wr=  6.5M  out=586.4K  tok=166.5M  cost=$117.44
+    Haiku 4.5    calls=344   rd=  6.5M  wr=  2.4M  out= 83.2K  tok=  9.0M  cost=$3.60
 
   Rates ($/MTok):
     Opus 4.6        in=$5.0     out=$25.0    crd=$0.5     cwr=6.25
     Haiku 4.5       in=$1.0     out=$5.0     crd=$0.1     cwr=1.25
-  Updated: 2026-08-05
+  Updated: 2026-08-06
 ```
 
 ### Sessions for a specific date
