@@ -109,11 +109,11 @@ This gives you:
 - **Status line** — shows per-model cost breakdown with subagent counts, period totals, and turn counts:
 
   ```
-  Prompt: Opus 4.6: 15c (253.2K) [standard,high] | Haiku 4.5: 2c (80K) [standard] | agents: Explore×2
-  Session: Opus 4.6: $4.8 (5.2M) [standard,high] | Haiku 4.5: 5c (300K) [standard] | agents: Explore×5, general-purpose×3
-  Today: Opus 4.6: $15.50 (12M) [standard,high] | Haiku 4.5: 5c (150K) [standard]
-  Week: Opus 4.6: $85.20 (68M) [standard,high] | Haiku 4.5: 23c (850K) [standard]
-  Month: Opus 4.6: $342.10 (280M) [standard,high] | Haiku 4.5: 91c (3.4M) [standard]
+  Prompt: Opus 4.6: 15c (253.2K) [std,hi] | Haiku 4.5: 2c (80K) [std] | agents: Explore×2
+  Session: Opus 4.6: $4.8 (5.2M) [std,hi] | Haiku 4.5: 5c (300K) [std] | agents: Explore×5, general-purpose×3
+  Today: Opus 4.6 [std,hi]: $12.30 (10M) | Opus 4.6 [std,med]: $3.20 (2M) | Haiku 4.5: 5c (150K)
+  Week: Opus 4.6 [std,hi]: $70.00 (56M) | Opus 4.6 [std,med]: $15.20 (12M) | Haiku 4.5: 23c (850K)
+  Month: Opus 4.6 [std,hi]: $280.00 (224M) | Opus 4.6 [std,med]: $62.10 (56M) | Haiku 4.5: 91c (3.4M)
   Turns: 5 (prompt) | 42 (session) | 128 (today) | 890 (week) | 3.2K (month)
   ```
 

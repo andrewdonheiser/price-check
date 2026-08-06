@@ -542,12 +542,16 @@ class TestScanJsonlSpeedEffort:
         daily, daily_turns = main.scan_jsonl_files(1)
         assert len(daily) == 1
         day = list(daily.keys())[0]
-        bucket = daily[day]["claude-opus-4-6"]
+        by_model = main._merge_to_model(daily[day])
+        bucket = by_model["claude-opus-4-6"]
         assert bucket["calls"] == 3
         assert bucket["speeds"]["standard"] == 2
         assert bucket["speeds"]["fast"] == 1
         assert bucket["efforts"]["high"] == 1
         assert bucket["efforts"]["medium"] == 2
+        # Verify variant-level keys exist
+        day_variants = daily[day]
+        assert len(day_variants) == 3  # (standard,high), (standard,medium), (fast,medium)
         assert daily_turns[day] == 1
 
 

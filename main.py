@@ -24,6 +24,12 @@ from pathlib import Path
 
 MAX_JSONL_SIZE = 100 * 1024 * 1024  # 100 MB
 _SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
+_TAG_ABBREV = {"standard": "std", "medium": "med", "high": "hi", "fast": "fast"}
+
+
+def _abbrev_tag(tag: str) -> str:
+    return _TAG_ABBREV.get(tag, tag)
+
 
 PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 PRICING_FILE = Path.home() / ".claude" / "price-check-rates.json"
@@ -289,6 +295,26 @@ def merge_buckets(target: dict, source: dict):
         target[k] += source[k]
 
 
+def _variant_key(model: str, speed: str, effort: str) -> str:
+    return f"{model}\t{speed}\t{effort}"
+
+
+def _base_model(key: str) -> str:
+    return key.split("\t")[0]
+
+
+def _merge_to_model(by_variant: dict[str, dict]) -> dict[str, dict]:
+    by_model: dict[str, dict] = defaultdict(_new_model_bucket)
+    for key, bucket in by_variant.items():
+        model = _base_model(key)
+        merge_buckets(by_model[model], bucket)
+        for s, cnt in bucket.get("speeds", {}).items():
+            by_model[model]["speeds"][s] += cnt
+        for e, cnt in bucket.get("efforts", {}).items():
+            by_model[model]["efforts"][e] += cnt
+    return dict(by_model)
+
+
 def _aggregate_for_dates(daily: dict[str, dict[str, dict]], target_dates: set[str]) -> dict[str, dict]:
     merged: dict[str, dict] = defaultdict(_new_model_bucket)
     for day, by_model in daily.items():
@@ -457,7 +483,8 @@ def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, i
                 model = msg.get("model", "unknown")
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
-                _accumulate(daily[day][model], usage, speed, effort)
+                vkey = _variant_key(model, speed, effort)
+                _accumulate(daily[day][vkey], usage, speed, effort)
 
     daily_turns = {day: len(pids) for day, pids in daily_prompt_ids.items()}
     return dict(daily), daily_turns
@@ -871,7 +898,7 @@ def print_daily(daily: dict[str, dict[str, dict]], days: int, daily_turns: dict[
         prev_week_key = week_key
         prev_month_key = month_key
 
-        by_model = daily[day]
+        by_model = _merge_to_model(daily[day])
         day_totals = _empty_bucket()
         for dd in by_model.values():
             merge_buckets(day_totals, dd)
@@ -1001,7 +1028,7 @@ def print_markdown(daily: dict[str, dict[str, dict]], days: int, daily_turns: di
         prev_week_key = week_key
         prev_month_key = month_key
 
-        by_model = daily[day]
+        by_model = _merge_to_model(daily[day])
         day_totals = _empty_bucket()
         for dd in by_model.values():
             merge_buckets(day_totals, dd)
@@ -1283,29 +1310,33 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     """Scan session JSONL and return state dict (same shape as run_hook writes)."""
     _ensure_pricing()
     jsonl_path = _find_session_jsonl(session_id, cwd)
-    if not jsonl_path:
-        return None
-
-    by_model, by_agent, last_by_model, last_agents, session_turns = _scan_session_usage(jsonl_path)
-    if not by_model:
-        return None
+    if jsonl_path:
+        by_model, by_agent, last_by_model, last_agents, session_turns = _scan_session_usage(jsonl_path)
+    else:
+        by_model, by_agent, last_by_model, last_agents, session_turns = {}, {}, {}, {}, 0
 
     def _build_display(raw: dict, all_tags: bool = False) -> dict:
         out = {}
         for m, d in raw.items():
             if d["calls"] <= 0:
                 continue
-            label = model_label(m)
             if all_tags:
-                speed_val = "/".join(sorted(d.get("speeds", {}))) or ""
-                effort_val = "/".join(sorted(d.get("efforts", {}))) or ""
+                model = _base_model(m)
+                parts = m.split("\t")
+                speed_val = parts[1] if len(parts) > 1 else ""
+                effort_val = parts[2] if len(parts) > 2 else ""
+                label = model_label(model)
+                tag_parts = [_abbrev_tag(t) for t in [speed_val, effort_val] if t]
+                display_key = f"{label} [{','.join(tag_parts)}]" if tag_parts else label
             else:
+                model = m
                 speed_val = _dominant(d.get("speeds", {}))
                 effort_val = _dominant(d.get("efforts", {}))
-            out[label] = {
-                "cost": cost_for_model(d, m), "tokens": total_tokens(d),
-                "calls": d["calls"], "speed": speed_val,
-                "effort": effort_val,
+                display_key = model_label(model)
+            out[display_key] = {
+                "cost": cost_for_model(d, model), "tokens": total_tokens(d),
+                "calls": d["calls"], "speed": _abbrev_tag(speed_val),
+                "effort": _abbrev_tag(effort_val),
             }
         return out
 
@@ -1370,9 +1401,6 @@ def run_status_line():
 
     if not state or not state.get("by_model"):
         state = _compute_state(session_id, ctx.get("cwd", ""))
-        if not state:
-            print("$0.00")
-            return
 
     def _fmt_model_line(models: dict, prefix: str, agents: dict | None = None) -> str:
         total_cost = sum(m.get("cost", 0) for m in models.values())
@@ -1395,9 +1423,7 @@ def run_status_line():
         parts = []
         for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
             mc = models[label]
-            tags = [t for t in [mc.get("speed", ""), mc.get("effort", "")] if t]
-            tag_str = f" [{','.join(tags)}]" if tags else ""
-            parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])}){tag_str}")
+            parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])})")
         total_cost = sum(m.get("cost", 0) for m in models.values())
         return f"{prefix}: {' | '.join(parts)}" if parts else f"{prefix}: {fmt_cost(total_cost)}"
 
