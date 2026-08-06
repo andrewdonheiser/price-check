@@ -1359,8 +1359,6 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     week_turns = sum(daily_turns.get(d, 0) for d in week_set)
     month_turns = sum(daily_turns.get(d, 0) for d in month_set)
 
-    prompt_calls = sum(m.get("calls", 0) for m in turn_models.values())
-
     return {
         "cost": session_cost, "tokens": session_tok,
         "last_cost": turn_cost, "last_tok": turn_tok,
@@ -1372,7 +1370,7 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
         "week_by_model": week_by_model,
         "month_by_model": month_by_model,
         "turns": {
-            "prompt": prompt_calls,
+            "prompt": 1 if turn_models else 0,
             "session": session_turns,
             "today": today_turns,
             "week": week_turns,
