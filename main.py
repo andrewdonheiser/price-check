@@ -23,6 +23,7 @@ from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 
 MAX_JSONL_SIZE = 100 * 1024 * 1024  # 100 MB
+_SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
 
 PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 PRICING_FILE = Path.home() / ".claude" / "price-check-rates.json"
@@ -381,6 +382,16 @@ def model_color(label: str) -> int:
     return MODEL_COLORS.get(label, 245)
 
 
+def _is_system_prompt(obj: dict) -> bool:
+    msg_content = (obj.get("message") or {}).get("content", "")
+    if isinstance(msg_content, list):
+        msg_content = (msg_content[0].get("text", "")
+                       if msg_content and isinstance(msg_content[0], dict) else "")
+    return isinstance(msg_content, str) and any(
+        msg_content.lstrip().startswith(p) for p in _SYSTEM_PREFIXES
+    )
+
+
 # ── Scanners ──────────────────────────────────────────────────────────
 
 def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, int]]:
@@ -398,6 +409,7 @@ def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, i
             continue
         if stat.st_mtime < cutoff_ts or stat.st_size > MAX_JSONL_SIZE:
             continue
+        system_pids: set[str] = set()
         with jsonl.open() as f:
             for line in f:
                 has_usage = '"usage"' in line
@@ -410,8 +422,10 @@ def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, i
                     continue
                 if has_pid:
                     pid = obj.get("promptId")
+                    if pid and _is_system_prompt(obj):
+                        system_pids.add(pid)
                     ts_str = obj.get("timestamp")
-                    if pid and ts_str:
+                    if pid and ts_str and pid not in system_pids:
                         try:
                             ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                         except ValueError:
@@ -1125,7 +1139,6 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
         subagent_files = list(subagents_dir.rglob("agent-*.jsonl"))
 
     latest_prompt_id = None
-    _SYSTEM_PREFIXES = ("<system-reminder", "<task-notification", "<command-message")
     system_pids: set[str] = set()
 
     # ── main session file ──
@@ -1145,13 +1158,7 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
                 continue
             pid = obj.get("promptId")
             if pid and pid != latest_prompt_id and pid not in system_pids:
-                msg_content = (obj.get("message") or {}).get("content", "")
-                if isinstance(msg_content, list):
-                    msg_content = (msg_content[0].get("text", "")
-                                   if msg_content and isinstance(msg_content[0], dict) else "")
-                if isinstance(msg_content, str) and any(
-                    msg_content.lstrip().startswith(p) for p in _SYSTEM_PREFIXES
-                ):
+                if _is_system_prompt(obj):
                     system_pids.add(pid)
                 else:
                     latest_prompt_id = pid
@@ -1283,29 +1290,22 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     if not by_model:
         return None
 
-    def _build_display(raw: dict) -> dict:
+    def _build_display(raw: dict, all_tags: bool = False) -> dict:
         out = {}
         for m, d in raw.items():
             if d["calls"] <= 0:
                 continue
             label = model_label(m)
+            if all_tags:
+                speed_val = "/".join(sorted(d.get("speeds", {}))) or ""
+                effort_val = "/".join(sorted(d.get("efforts", {}))) or ""
+            else:
+                speed_val = _dominant(d.get("speeds", {}))
+                effort_val = _dominant(d.get("efforts", {}))
             out[label] = {
                 "cost": cost_for_model(d, m), "tokens": total_tokens(d),
-                "calls": d["calls"], "speed": _dominant(d.get("speeds", {})),
-                "effort": _dominant(d.get("efforts", {})),
-            }
-        return out
-
-    def _build_period_display(raw: dict[str, dict]) -> dict:
-        out = {}
-        for m, d in raw.items():
-            if d["calls"] <= 0:
-                continue
-            label = model_label(m)
-            out[label] = {
-                "cost": cost_for_model(d, m), "tokens": total_tokens(d),
-                "calls": d["calls"], "speed": _dominant(d.get("speeds", {})),
-                "effort": _dominant(d.get("efforts", {})),
+                "calls": d["calls"], "speed": speed_val,
+                "effort": effort_val,
             }
         return out
 
@@ -1320,9 +1320,9 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     daily, daily_turns = scan_jsonl_files(31)
     today_set, week_set, month_set = _period_date_sets()
 
-    today_by_model = _build_period_display(_aggregate_for_dates(daily, today_set))
-    week_by_model = _build_period_display(_aggregate_for_dates(daily, week_set))
-    month_by_model = _build_period_display(_aggregate_for_dates(daily, month_set))
+    today_by_model = _build_display(_aggregate_for_dates(daily, today_set), all_tags=True)
+    week_by_model = _build_display(_aggregate_for_dates(daily, week_set), all_tags=True)
+    month_by_model = _build_display(_aggregate_for_dates(daily, month_set), all_tags=True)
 
     today_turns = sum(daily_turns.get(d, 0) for d in today_set)
     week_turns = sum(daily_turns.get(d, 0) for d in week_set)

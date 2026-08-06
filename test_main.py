@@ -551,6 +551,36 @@ class TestScanJsonlSpeedEffort:
         assert daily_turns[day] == 1
 
 
+class TestScanJsonlSystemPromptFiltering:
+    def test_system_prompts_excluded_from_daily_turns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "PROJECTS_DIR", tmp_path)
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        lines = [
+            json.dumps({"promptId": "p1", "timestamp": ts, "message": {"content": "user question"}}),
+            json.dumps({"requestId": "r1", "promptId": "p1", "timestamp": ts,
+                        "message": {"model": "claude-opus-4-6",
+                                    "usage": {"input_tokens": 100, "output_tokens": 50,
+                                              "cache_read_input_tokens": 80, "cache_creation_input_tokens": 10}}}),
+            json.dumps({"promptId": "sys1", "timestamp": ts, "message": {"content": "<system-reminder> stuff"}}),
+            json.dumps({"requestId": "r2", "promptId": "sys1", "timestamp": ts,
+                        "message": {"model": "claude-opus-4-6",
+                                    "usage": {"input_tokens": 50, "output_tokens": 25,
+                                              "cache_read_input_tokens": 40, "cache_creation_input_tokens": 5}}}),
+            json.dumps({"promptId": "p2", "timestamp": ts, "message": {"content": "another user question"}}),
+            json.dumps({"requestId": "r3", "promptId": "p2", "timestamp": ts,
+                        "message": {"model": "claude-opus-4-6",
+                                    "usage": {"input_tokens": 100, "output_tokens": 50,
+                                              "cache_read_input_tokens": 80, "cache_creation_input_tokens": 10}}}),
+        ]
+        jsonl = tmp_path / "project" / "session.jsonl"
+        _write_jsonl(jsonl, lines)
+
+        daily, daily_turns = main.scan_jsonl_files(1)
+        day = list(daily_turns.keys())[0]
+        assert daily_turns[day] == 2
+
+
 class TestFmtModelLineAgents:
     def test_agents_displayed(self):
         models = {"Opus 4.6": {"cost": 1.0, "tokens": 1000, "speed": "", "effort": ""}}
