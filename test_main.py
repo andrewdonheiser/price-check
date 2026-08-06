@@ -104,7 +104,7 @@ class TestScanSessionUsage:
         _write_jsonl(jsonl, [
             _usage_line("r1", prompt_id="p1", input_tokens=100, output_tokens=50),
         ])
-        by_model, by_agent, last_by_model, last_agents = main._scan_session_usage(jsonl)
+        by_model, by_agent, last_by_model, last_agents, _ = main._scan_session_usage(jsonl)
 
         assert "claude-opus-4-6" in by_model
         assert by_model["claude-opus-4-6"]["calls"] == 1
@@ -122,7 +122,7 @@ class TestScanSessionUsage:
             _prompt_id_line("p2"),
             _usage_line("r2", prompt_id="p2", input_tokens=200, output_tokens=75),
         ])
-        by_model, _, last_by_model, _ = main._scan_session_usage(jsonl)
+        by_model, _, last_by_model, _, _ = main._scan_session_usage(jsonl)
 
         assert by_model["claude-opus-4-6"]["calls"] == 2
         assert by_model["claude-opus-4-6"]["input"] == 300
@@ -138,7 +138,7 @@ class TestScanSessionUsage:
             _system_prompt_id_line("p-sys", "<system-reminder>"),
             _usage_line("r2", prompt_id="p-sys", input_tokens=50, output_tokens=25),
         ])
-        _, _, last_by_model, _ = main._scan_session_usage(jsonl)
+        _, _, last_by_model, _, _ = main._scan_session_usage(jsonl)
 
         assert last_by_model["claude-opus-4-6"]["calls"] == 2
         assert last_by_model["claude-opus-4-6"]["input"] == 150
@@ -151,7 +151,7 @@ class TestScanSessionUsage:
             _system_prompt_id_line("p-task", "<task-notification>"),
             _usage_line("r2", prompt_id="p-task", input_tokens=50, output_tokens=25),
         ])
-        _, _, last_by_model, _ = main._scan_session_usage(jsonl)
+        _, _, last_by_model, _, _ = main._scan_session_usage(jsonl)
 
         assert last_by_model["claude-opus-4-6"]["calls"] == 2
 
@@ -162,7 +162,7 @@ class TestScanSessionUsage:
             _usage_line("r1", prompt_id="p1", input_tokens=100, output_tokens=50),
             _system_prompt_id_line("p-cmd", "<command-message>"),
         ])
-        _, _, last_by_model, _ = main._scan_session_usage(jsonl)
+        _, _, last_by_model, _, _ = main._scan_session_usage(jsonl)
 
         assert last_by_model["claude-opus-4-6"]["calls"] == 1
 
@@ -175,7 +175,7 @@ class TestScanSessionUsage:
             _prompt_id_line("p2", content="<div>some html</div>"),
             _usage_line("r2", prompt_id="p2", input_tokens=200, output_tokens=75),
         ])
-        _, _, last_by_model, _ = main._scan_session_usage(jsonl)
+        _, _, last_by_model, _, _ = main._scan_session_usage(jsonl)
 
         assert last_by_model["claude-opus-4-6"]["calls"] == 1
         assert last_by_model["claude-opus-4-6"]["input"] == 200
@@ -186,7 +186,7 @@ class TestScanSessionUsage:
             _usage_line("r1", prompt_id="p1", input_tokens=100, output_tokens=50),
             _usage_line("r1", prompt_id="p1", input_tokens=100, output_tokens=50),
         ])
-        by_model, _, _, _ = main._scan_session_usage(jsonl)
+        by_model, _, _, _, _ = main._scan_session_usage(jsonl)
         assert by_model["claude-opus-4-6"]["calls"] == 1
 
     def test_corrupt_lines_skipped(self, tmp_path):
@@ -196,17 +196,17 @@ class TestScanSessionUsage:
             '{"broken": true, "usage": "yes"}',
             _usage_line("r1", prompt_id="p1"),
         ])
-        by_model, _, _, _ = main._scan_session_usage(jsonl)
+        by_model, _, _, _, _ = main._scan_session_usage(jsonl)
         assert by_model["claude-opus-4-6"]["calls"] == 1
 
     def test_missing_file_returns_empty(self, tmp_path):
         result = main._scan_session_usage(tmp_path / "nonexistent.jsonl")
-        assert result == ({}, {}, {}, {})
+        assert result == ({}, {}, {}, {}, 0)
 
     def test_empty_file(self, tmp_path):
         jsonl = tmp_path / "session.jsonl"
         jsonl.write_text("")
-        by_model, by_agent, last_by_model, last_agents = main._scan_session_usage(jsonl)
+        by_model, by_agent, last_by_model, last_agents, _ = main._scan_session_usage(jsonl)
         assert by_model == {}
         assert by_agent == {}
 
@@ -215,7 +215,7 @@ class TestScanSessionUsage:
         _write_jsonl(jsonl, [
             _usage_line("r1", prompt_id="p1", speed="fast", effort="high"),
         ])
-        by_model, _, _, _ = main._scan_session_usage(jsonl)
+        by_model, _, _, _, _ = main._scan_session_usage(jsonl)
         assert by_model["claude-opus-4-6"]["speeds"]["fast"] == 1
         assert by_model["claude-opus-4-6"]["efforts"]["high"] == 1
 
@@ -252,7 +252,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        _, by_agent, _, last_agents = main._scan_session_usage(jsonl)
+        _, by_agent, _, last_agents, _ = main._scan_session_usage(jsonl)
 
         assert by_agent["Explore"] == 2
         assert by_agent["general-purpose"] == 1
@@ -270,7 +270,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        by_model, _, _, _ = main._scan_session_usage(jsonl)
+        by_model, _, _, _, _ = main._scan_session_usage(jsonl)
 
         assert by_model["claude-opus-4-6"]["input"] == 300
         assert by_model["claude-opus-4-6"]["output"] == 150
@@ -289,7 +289,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        _, by_agent, last_by_model, last_agents = main._scan_session_usage(jsonl)
+        _, by_agent, last_by_model, last_agents, _ = main._scan_session_usage(jsonl)
 
         assert by_agent["Explore"] == 1
         assert last_agents == {}
@@ -309,7 +309,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        _, _, last_by_model, last_agents = main._scan_session_usage(jsonl)
+        _, _, last_by_model, last_agents, _ = main._scan_session_usage(jsonl)
 
         assert last_agents["Explore"] == 1
         assert last_by_model["claude-opus-4-6"]["input"] == 250
@@ -319,7 +319,7 @@ class TestSubagentTracking:
         _write_jsonl(jsonl, [
             _usage_line("r1", prompt_id="p1"),
         ])
-        _, by_agent, _, last_agents = main._scan_session_usage(jsonl)
+        _, by_agent, _, last_agents, _ = main._scan_session_usage(jsonl)
         assert by_agent == {}
         assert last_agents == {}
 
@@ -334,7 +334,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        _, by_agent, _, last_agents = main._scan_session_usage(jsonl)
+        _, by_agent, _, last_agents, _ = main._scan_session_usage(jsonl)
         assert by_agent == {}
         assert last_agents == {}
 
@@ -350,7 +350,7 @@ class TestSubagentTracking:
             _usage_line("r2", prompt_id="p1", attribution_agent="workflow-subagent"),
         ])
 
-        _, by_agent, _, last_agents = main._scan_session_usage(jsonl)
+        _, by_agent, _, last_agents, _ = main._scan_session_usage(jsonl)
         assert by_agent["workflow-subagent"] == 1
 
     def test_subagent_dedup_across_files(self, tmp_path):
@@ -365,7 +365,7 @@ class TestSubagentTracking:
                 ]),
             ],
         )
-        by_model, _, _, _ = main._scan_session_usage(jsonl)
+        by_model, _, _, _, _ = main._scan_session_usage(jsonl)
         assert by_model["claude-opus-4-6"]["calls"] == 1
         assert by_model["claude-opus-4-6"]["input"] == 100
 
@@ -384,7 +384,7 @@ class TestSubagentTracking:
         bad_file.write_text("data")
         os.chmod(str(bad_file), 0o000)
 
-        by_model, by_agent, _, _ = main._scan_session_usage(jsonl)
+        by_model, by_agent, _, _, _ = main._scan_session_usage(jsonl)
         assert by_model["claude-opus-4-6"]["calls"] == 2
         assert by_agent["Explore"] == 1
 
@@ -430,6 +430,126 @@ class TestCostForModel:
 
 
 # ── _fmt_model_line agents display ───────────────────────────────────
+
+# ── Turn count tracking ─────────────────────────────────────────────
+
+class TestTurnCount:
+    def test_session_turn_count(self, tmp_path):
+        jsonl = tmp_path / "session.jsonl"
+        _write_jsonl(jsonl, [
+            _prompt_id_line("p1"),
+            _usage_line("r1", prompt_id="p1"),
+            _prompt_id_line("p2"),
+            _usage_line("r2", prompt_id="p2"),
+            _prompt_id_line("p3"),
+            _usage_line("r3", prompt_id="p3"),
+        ])
+        _, _, _, _, turn_count = main._scan_session_usage(jsonl)
+        assert turn_count == 3
+
+    def test_system_prompts_not_counted(self, tmp_path):
+        jsonl = tmp_path / "session.jsonl"
+        _write_jsonl(jsonl, [
+            _prompt_id_line("p1"),
+            _usage_line("r1", prompt_id="p1"),
+            _system_prompt_id_line("sys1"),
+            _usage_line("r2", prompt_id="sys1"),
+            _prompt_id_line("p2"),
+            _usage_line("r3", prompt_id="p2"),
+        ])
+        _, _, _, _, turn_count = main._scan_session_usage(jsonl)
+        assert turn_count == 2
+
+
+# ── Period aggregation ──────────────────────────────────────────────
+
+class TestPeriodAggregation:
+    def test_aggregate_for_dates(self):
+        daily = {
+            "2026-08-04": {"claude-opus-4-6": {"calls": 10, "input": 100, "output": 50, "cache_read": 80, "cache_write": 10}},
+            "2026-08-05": {"claude-opus-4-6": {"calls": 5, "input": 50, "output": 25, "cache_read": 40, "cache_write": 5}},
+            "2026-08-06": {"claude-opus-4-6": {"calls": 3, "input": 30, "output": 15, "cache_read": 20, "cache_write": 3}},
+        }
+        result = main._aggregate_for_dates(daily, {"2026-08-04", "2026-08-05"})
+        assert result["claude-opus-4-6"]["calls"] == 15
+        assert result["claude-opus-4-6"]["input"] == 150
+
+    def test_aggregate_merges_speed_effort(self):
+        daily = {
+            "2026-08-04": {"claude-opus-4-6": {
+                "calls": 10, "input": 100, "output": 50, "cache_read": 80, "cache_write": 10,
+                "speeds": {"standard": 8, "fast": 2}, "efforts": {"high": 6, "medium": 4},
+            }},
+            "2026-08-05": {"claude-opus-4-6": {
+                "calls": 5, "input": 50, "output": 25, "cache_read": 40, "cache_write": 5,
+                "speeds": {"standard": 3, "fast": 2}, "efforts": {"high": 1, "medium": 4},
+            }},
+        }
+        result = main._aggregate_for_dates(daily, {"2026-08-04", "2026-08-05"})
+        assert result["claude-opus-4-6"]["speeds"]["standard"] == 11
+        assert result["claude-opus-4-6"]["speeds"]["fast"] == 4
+        assert result["claude-opus-4-6"]["efforts"]["high"] == 7
+        assert result["claude-opus-4-6"]["efforts"]["medium"] == 8
+
+    def test_aggregate_empty_dates(self):
+        daily = {
+            "2026-08-04": {"claude-opus-4-6": {"calls": 10, "input": 100, "output": 50, "cache_read": 80, "cache_write": 10}},
+        }
+        result = main._aggregate_for_dates(daily, {"2026-12-01"})
+        assert result == {}
+
+    def test_period_date_sets(self):
+        today_set, week_set, month_set = main._period_date_sets()
+        from datetime import date as _d, datetime as _dt
+        today = _dt.now().date()
+        assert today.isoformat() in today_set
+        assert len(today_set) == 1
+        assert today.isoformat() in week_set
+        assert len(week_set) == 7
+        assert today.isoformat() in month_set
+        assert today.replace(day=1).isoformat() in month_set
+
+
+# ── scan_jsonl_files speed/effort ───────────────────────────────────
+
+class TestScanJsonlSpeedEffort:
+    def test_speed_effort_tracked(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "PROJECTS_DIR", tmp_path)
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        lines = []
+        for i in range(3):
+            obj = {
+                "requestId": f"r{i}",
+                "promptId": "p1",
+                "timestamp": ts,
+                "message": {
+                    "model": "claude-opus-4-6",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_read_input_tokens": 80,
+                        "cache_creation_input_tokens": 10,
+                        "speed": "standard" if i < 2 else "fast",
+                    },
+                },
+                "effort": "high" if i == 0 else "medium",
+            }
+            lines.append(json.dumps(obj))
+        jsonl = tmp_path / "project" / "session.jsonl"
+        _write_jsonl(jsonl, lines)
+
+        daily, daily_turns = main.scan_jsonl_files(1)
+        assert len(daily) == 1
+        day = list(daily.keys())[0]
+        bucket = daily[day]["claude-opus-4-6"]
+        assert bucket["calls"] == 3
+        assert bucket["speeds"]["standard"] == 2
+        assert bucket["speeds"]["fast"] == 1
+        assert bucket["efforts"]["high"] == 1
+        assert bucket["efforts"]["medium"] == 2
+        assert daily_turns[day] == 1
+
 
 class TestFmtModelLineAgents:
     def test_agents_displayed(self):
