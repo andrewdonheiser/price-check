@@ -481,6 +481,8 @@ def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, i
                     continue
                 day = ts.astimezone().strftime("%Y-%m-%d")
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
                 vkey = _variant_key(model, speed, effort)
@@ -551,6 +553,8 @@ def scan_session_data(days: int, date_filter: str = None) -> dict[str, dict]:
                 s = sessions[session_id]
                 s["date"] = s["date"] or day
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 s["by_model"][model]["calls"] += 1
                 s["by_model"][model]["input"] += usage.get("input_tokens", 0)
                 s["by_model"][model]["output"] += usage.get("output_tokens", 0)
@@ -1201,6 +1205,8 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
                 continue
             seen.add(req_id)
             model = msg.get("model", "unknown")
+            if model.startswith("<"):
+                continue
             speed = usage.get("speed", "")
             effort = obj.get("effort", "")
             for bucket in (by_model[model], last_by_model[model]):
@@ -1238,6 +1244,8 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
                 if not agent_type:
                     agent_type = obj.get("attributionAgent", "")
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
                 for bucket in (by_model[model], file_usage[model]):
