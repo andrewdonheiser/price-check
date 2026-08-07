@@ -1343,10 +1343,10 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     session_models = _build_display(by_model)
     turn_models = _build_display(last_by_model)
 
-    session_cost = sum(m["cost"] for m in session_models.values())
-    session_tok = sum(m["tokens"] for m in session_models.values())
-    turn_cost = sum(m["cost"] for m in turn_models.values())
-    turn_tok = sum(m["tokens"] for m in turn_models.values())
+    session_cost = sum(m["cost"] or 0 for m in session_models.values())
+    session_tok = sum(m["tokens"] or 0 for m in session_models.values())
+    turn_cost = sum(m["cost"] or 0 for m in turn_models.values())
+    turn_tok = sum(m["tokens"] or 0 for m in turn_models.values())
 
     daily, daily_turns = scan_jsonl_files(31)
     today_set, week_set, month_set = _period_date_sets()
@@ -1401,7 +1401,7 @@ def run_status_line():
         state = _compute_state(session_id, ctx.get("cwd", ""))
 
     def _fmt_model_line(models: dict, prefix: str, agents: dict | None = None) -> str:
-        total_cost = sum(m.get("cost", 0) for m in models.values())
+        total_cost = sum(m.get("cost") or 0 for m in models.values())
         parts = []
         for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
             mc = models[label]
@@ -1422,7 +1422,7 @@ def run_status_line():
         for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
             mc = models[label]
             parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])})")
-        total_cost = sum(m.get("cost", 0) for m in models.values())
+        total_cost = sum(m.get("cost") or 0 for m in models.values())
         return f"{prefix}: {' | '.join(parts)}" if parts else f"{prefix}: {fmt_cost(total_cost)}"
 
     last_by_model = state.get("last_by_model", {})
