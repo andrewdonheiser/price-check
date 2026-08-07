@@ -481,6 +481,8 @@ def scan_jsonl_files(days: int) -> tuple[dict[str, dict[str, dict]], dict[str, i
                     continue
                 day = ts.astimezone().strftime("%Y-%m-%d")
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
                 vkey = _variant_key(model, speed, effort)
@@ -551,6 +553,8 @@ def scan_session_data(days: int, date_filter: str = None) -> dict[str, dict]:
                 s = sessions[session_id]
                 s["date"] = s["date"] or day
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 s["by_model"][model]["calls"] += 1
                 s["by_model"][model]["input"] += usage.get("input_tokens", 0)
                 s["by_model"][model]["output"] += usage.get("output_tokens", 0)
@@ -1201,6 +1205,8 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
                 continue
             seen.add(req_id)
             model = msg.get("model", "unknown")
+            if model.startswith("<"):
+                continue
             speed = usage.get("speed", "")
             effort = obj.get("effort", "")
             for bucket in (by_model[model], last_by_model[model]):
@@ -1238,6 +1244,8 @@ def _scan_session_usage(jsonl_path: Path) -> tuple[dict, dict, dict, dict, int]:
                 if not agent_type:
                     agent_type = obj.get("attributionAgent", "")
                 model = msg.get("model", "unknown")
+                if model.startswith("<"):
+                    continue
                 speed = usage.get("speed", "")
                 effort = obj.get("effort", "")
                 for bucket in (by_model[model], file_usage[model]):
@@ -1343,10 +1351,10 @@ def _compute_state(session_id: str, cwd: str = "") -> dict | None:
     session_models = _build_display(by_model)
     turn_models = _build_display(last_by_model)
 
-    session_cost = sum(m["cost"] for m in session_models.values())
-    session_tok = sum(m["tokens"] for m in session_models.values())
-    turn_cost = sum(m["cost"] for m in turn_models.values())
-    turn_tok = sum(m["tokens"] for m in turn_models.values())
+    session_cost = sum(m["cost"] or 0 for m in session_models.values())
+    session_tok = sum(m["tokens"] or 0 for m in session_models.values())
+    turn_cost = sum(m["cost"] or 0 for m in turn_models.values())
+    turn_tok = sum(m["tokens"] or 0 for m in turn_models.values())
 
     daily, daily_turns = scan_jsonl_files(31)
     today_set, week_set, month_set = _period_date_sets()
@@ -1401,7 +1409,7 @@ def run_status_line():
         state = _compute_state(session_id, ctx.get("cwd", ""))
 
     def _fmt_model_line(models: dict, prefix: str, agents: dict | None = None) -> str:
-        total_cost = sum(m.get("cost", 0) for m in models.values())
+        total_cost = sum(m.get("cost") or 0 for m in models.values())
         parts = []
         for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
             mc = models[label]
@@ -1422,7 +1430,7 @@ def run_status_line():
         for label in sorted(models, key=lambda m: models[m].get("tokens", 0), reverse=True):
             mc = models[label]
             parts.append(f"{label}: {fmt_cost(mc['cost'])} ({fmt_tokens(mc['tokens'])})")
-        total_cost = sum(m.get("cost", 0) for m in models.values())
+        total_cost = sum(m.get("cost") or 0 for m in models.values())
         return f"{prefix}: {' | '.join(parts)}" if parts else f"{prefix}: {fmt_cost(total_cost)}"
 
     last_by_model = state.get("last_by_model", {})
